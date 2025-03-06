@@ -1,0 +1,57 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, avg
+from kafka import KafkaProducer
+import json
+from prometheus_client import start_http_server, Summary, Counter
+import time
+
+# Initialize Prometheus metrics
+REQUEST_TIME = Summary('processing_time_seconds', 'Time spent processing data')
+PROCESSED_RECORDS = Counter('processed_records_total', 'Total number of processed records')
+
+# Start Prometheus server
+start_http_server(8000)
+
+# Initialize Spark Session
+spark = SparkSession.builder \
+    .appName("BigDataPipeline") \
+    .config("spark.hadoop.fs.defaultFS", "hdfs://localhost:9000") \
+    .getOrCreate()
+
+@REQUEST_TIME.time()
+def process_data():
+    # Load data from HDFS
+    file_path = "hdfs://localhost:9000/user/data/large_dataset.csv"
+    data = spark.read.csv(file_path, header=True, inferSchema=True)
+
+    # Processing: Example transformation
+    result = data.groupBy("region").agg(avg("sales").alias("average_sales"))
+
+    # Show result
+    result.show()
+
+    # Save the processed data back to HDFS
+    output_path = "hdfs://localhost:9000/user/data/output/average_sales"
+    result.write.csv(output_path, header=True)
+
+    # Initialize Kafka Producer
+    producer = KafkaProducer(
+        bootstrap_servers=['localhost:9092'],
+        value_serializer=lambda v: json.dumps(v).encode('utf-8')
+    )
+
+    # Send processed data to Kafka topic
+    for row in result.collect():
+        message = {"region": row['region'], "average_sales": row['average_sales']}
+        producer.send('processed_sales_data', value=message)
+        PROCESSED_RECORDS.inc()
+        print(f"Sent to Kafka: {message}")
+
+    producer.flush()
+
+if __name__ == "__main__":
+    while True:
+        process_data()
+        time.sleep(60)  # Re-run every 60 seconds
+
+spark.stop()
